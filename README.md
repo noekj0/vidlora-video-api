@@ -2,9 +2,9 @@
 
 **This is real API code, not a mockup.** It receives a permitted public YouTube, Instagram, or TikTok URL, attempts to obtain metadata using yt-dlp, and returns a temporary URL. A visit to the temporary URL makes the server attempt to download the video and deliver the file using `Content-Disposition: attachment`.
 
-This is an **experimental developer version**. The API is deployed at https://vidlora-video-api-production.up.railway.app on a Railway trial. The health and CORS checks pass. The authorized YouTube test on 2026-11-23 was rejected by YouTube with a bot-confirmation requirement; no successful hosted video download is claimed. Instagram and TikTok have not been tested live. Render deployment was cancelled because card verification was declined. YouTube, Instagram and TikTok may reject requests from datacenter IPs or change extraction behavior. No watermark-removal feature is provided. Do not download media without rights or authorization, and comply with source platform terms.
+This is an **experimental developer version**. The API is deployed at https://vidlora-video-api-production.up.railway.app on a Railway trial. The health and CORS checks pass. An initial YouTube test was rejected. After the worker protocol fix, a complete 81,037,191-byte MP4 was downloaded from Railway and its video/audio decoded successfully on 2026-11-23. Platform availability can still vary; this does not guarantee every URL. Instagram and TikTok have not been tested live. Render deployment was cancelled because card verification was declined. YouTube, Instagram and TikTok may reject requests from datacenter IPs or change extraction behavior. No watermark-removal feature is provided. Do not download media without rights or authorization, and comply with source platform terms.
 
-## Quick deploy on Render using GitHub (easiest)
+## Original optional Render deployment instructions
 
 1. Unzip this backend ZIP on your computer.
 2. Sign in to GitHub and create a **new repository**, e.g. `vidlora-video-api`. Use a **separate repo** from the repository where you host your APK asset.
@@ -54,3 +54,7 @@ If available, the server responds with the real video title and an expiring `/ap
 
 This version uses FFmpeg, Node 22 and `yt-dlp[default]` (which includes EJS support). Production-hardening and active platform tests remain necessary.
 
+
+
+## Current deployment and limits
+The existing Railway service deploys automatically from GitHub main. Keep app.py and worker.py in the same commit. The Netlify frontend remains on vidlora.download. Media selection budgets both video and audio within VIDLORA_MAX_VIDEO_MB (currently 80 MiB), with a container margin. Long videos may need lower resolution; the API returns the selected resolution. Download links last one hour. Worker results use result.json, separately from yt-dlp/FFmpeg console output. Railway is on its limited trial; this does not create a paid subscription or guarantee permanent free hosting.

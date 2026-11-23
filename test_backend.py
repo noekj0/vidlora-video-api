@@ -160,3 +160,21 @@ def test_long_video_can_use_smaller_opus_audio(monkeypatch):
     info['formats'].pop(1)
     with pytest.raises(api.VideoSizeLimit):
         api.format_within_budget(info)
+
+
+def test_rejected_audio_falls_back_to_another_real_track(monkeypatch):
+    monkeypatch.setattr(api, 'MAX_VIDEO_BYTES', 1000)
+    formats = [
+        {'format_id':'broken', 'ext':'m4a', 'vcodec':'none', 'acodec':'aac', 'abr':128, 'filesize':200, 'url':'https://example.invalid/broken'},
+        {'format_id':'working', 'ext':'webm', 'vcodec':'none', 'acodec':'opus', 'abr':48, 'filesize':150, 'url':'https://example.invalid/working'},
+        {'format_id':'video', 'ext':'mp4', 'vcodec':'avc1', 'acodec':'none', 'height':360, 'filesize':600, 'url':'https://example.invalid/video'},
+    ]
+    info = {'id':'test', 'title':'Permitted test', 'extractor':'test', 'formats':formats}
+    opts = api.extractor_options()
+    opts['format'] = api.format_within_budget(info)
+    def probes(items, warning=True):
+        yield from (f for f in items if f['format_id'] != 'broken')
+    with api.yt_dlp.YoutubeDL(opts) as downloader:
+        monkeypatch.setattr(downloader, '_check_formats', probes)
+        result = downloader.process_ie_result(info, download=False)
+    assert [f['format_id'] for f in result['requested_formats']] == ['video', 'working']

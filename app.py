@@ -111,8 +111,11 @@ async def run_worker(action: str, url: str, folder: Path, timeout: float):
         stdout, stderr = communication.result()
         if process.returncode:
             logging.warning('Video worker failed: %s', stderr.decode(errors='replace')[-1500:])
-            if any(reason in stderr.decode(errors='replace').lower() for reason in ('not a bot', 'http error 403')):
-                raise SourceBlocked(BLOCKED_MESSAGE)
+            failure = stderr.decode(errors='replace').lower()
+            if 'not a bot' in failure:
+                raise SourceBlocked('YouTube requires a sign-in check from this hosting server. Please try again later.')
+            if 'http error 403' in failure:
+                raise SourceBlocked('The video source rejected the media file with HTTP 403. Please try another permitted video.')
             if 'no format fits the server size limit' in stderr.decode(errors='replace').lower():
                 raise VideoSizeLimit('No available video quality fits the server size limit.')
             if process.returncode == -9:
@@ -241,18 +244,23 @@ def format_within_budget(info):
             for track in audio:
                 if size(video) + size(track) <= budget:
                     choices.append((height, index, str(video['format_id']) + '+' + str(track['format_id'])))
-                    break
     if choices:
-        return max(choices)[2]
+        # A source can advertise a stream but reject its media URL. Let yt-dlp
+        # probe a bounded list and fall through to another real combination.
+        ordered = sorted(choices, key=lambda c: (c[0], c[1]), reverse=True)
+        return '/'.join(list(dict.fromkeys(c[2] for c in ordered))[:8])
     if formats and all(size(f) == float('inf') for f in formats):
         return VIDEO_FORMAT  # Some platforms do not advertise sizes; enforce while downloading.
     raise VideoSizeLimit('No format fits the server size limit.')
 
 
 def get_metadata(url: str):
-    with yt_dlp.YoutubeDL(extractor_options()) as downloader:
+    options = extractor_options()
+    options['check_formats'] = False  # Inspect sizes before probing candidate media.
+    with yt_dlp.YoutubeDL(options) as downloader:
         info = downloader.extract_info(url, download=False)
         if isinstance(info, dict) and info.get('_type') != 'playlist' and not info.get('is_live'):
+            downloader.params['check_formats'] = 'selected'
             downloader.format_selector = downloader.build_format_selector(format_within_budget(info))
             info = downloader.process_ie_result(info, download=False)
     if not isinstance(info, dict):
@@ -296,6 +304,7 @@ def download_video(url: str, folder: Path):
     opts = extractor_options()
     opts.update({
         'skip_download': False,
+        'check_formats': False,
         'format': VIDEO_FORMAT,
         'outtmpl': str(folder / 'vidlora.%(ext)s'),
         'restrictfilenames': True,
@@ -309,6 +318,7 @@ def download_video(url: str, folder: Path):
         info = downloader.extract_info(url, download=False)
         if not isinstance(info, dict) or info.get('_type') == 'playlist' or info.get('is_live') or info.get('has_drm'):
             raise ValueError('Only individual public videos are supported.')
+        downloader.params['check_formats'] = 'selected'
         downloader.format_selector = downloader.build_format_selector(format_within_budget(info))
         downloader.process_ie_result(info, download=True)
     path = folder / 'vidlora.mp4'
@@ -321,7 +331,7 @@ def download_video(url: str, folder: Path):
 
 @app.get('/health')
 def health():
-    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL, 'api_version': '1.2.0'}
+    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL, 'api_version': '1.2.1'}
 
 
 @app.post('/api/resolve')
@@ -338,9 +348,9 @@ async def resolve(data: ResolveRequest, request: Request):
         raise HTTPException(503, detail='Server busy. Try again shortly.')
     folder = Path(tempfile.mkdtemp(prefix='vidlora-metadata-'))
     try:
-        info = await run_worker('metadata', data.url, folder, 35)
+        info = await run_worker('metadata', data.url, folder, 75)
     except SourceBlocked as ex:
-        raise HTTPException(422, detail=BLOCKED_MESSAGE) from ex
+        raise HTTPException(422, detail=str(ex) or BLOCKED_MESSAGE) from ex
     except VideoSizeLimit as ex:
         raise HTTPException(413, detail='This video cannot fit the 80 MB limit at any available quality.') from ex
     except Exception as ex:
@@ -396,7 +406,7 @@ async def download(token: str, request: Request, background_tasks: BackgroundTas
         if not isinstance(ex, Exception):
             raise
         if isinstance(ex, SourceBlocked):
-            raise HTTPException(422, detail=BLOCKED_MESSAGE) from ex
+            raise HTTPException(422, detail=str(ex) or BLOCKED_MESSAGE) from ex
         if isinstance(ex, VideoSizeLimit):
             raise HTTPException(413, detail='This video cannot fit the 80 MB limit at any available quality.') from ex
         raise HTTPException(422, detail='Download failed or source does not permit this file.') from ex
