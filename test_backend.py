@@ -17,6 +17,19 @@ import app as api
 client = TestClient(api.app)
 
 
+@pytest.fixture(autouse=True)
+def reset_download_cache(monkeypatch):
+    import asyncio
+    import shutil
+    api._limiter.clear()
+    monkeypatch.setattr(api, '_download_lock', asyncio.Semaphore(2))
+    monkeypatch.setattr(api, '_creation_lock', asyncio.Lock())
+    yield
+    for job in api._downloads.values():
+        shutil.rmtree(job.folder, ignore_errors=True)
+    api._downloads.clear()
+
+
 def test_health():
     assert client.get('/health').status_code == 200
 
@@ -51,7 +64,8 @@ def test_real_download_route(monkeypatch, tmp_path):
     assert media.status_code == 200, media.text
     assert 'attachment' in media.headers['content-disposition']
     assert media.content == b'fake-mp4-test-bytes'
-    assert all(not folder.exists() for folder in folders)
+    assert not folders[0].exists()  # Metadata workspace is removed immediately.
+    assert folders[-1].exists()  # Safari may resume with another range request.
     assert api._download_lock._value == 2
 
 
@@ -111,7 +125,7 @@ def test_worker_failure_cleans_up(monkeypatch):
     monkeypatch.setattr(api, 'run_worker', fail)
     api._limiter.clear()
     token = api.sign_url('https://youtu.be/abcdefghijk')
-    assert client.get('/api/download/' + token).status_code == 422
+    assert client.get('/api/download/' + token).status_code == 504
     assert all(not folder.exists() for folder in folders)
     assert api._download_lock._value == 2
 
@@ -178,3 +192,60 @@ def test_rejected_audio_falls_back_to_another_real_track(monkeypatch):
         monkeypatch.setattr(downloader, '_check_formats', probes)
         result = downloader.process_ie_result(info, download=False)
     assert [f['format_id'] for f in result['requested_formats']] == ['video', 'working']
+
+
+def test_iphone_selection_rejects_av1_even_when_smaller(monkeypatch):
+    monkeypatch.setattr(api, 'MAX_VIDEO_BYTES', 1000)
+    formats = [
+        {'format_id':'a', 'ext':'m4a', 'vcodec':'none', 'acodec':'aac', 'filesize':100},
+        {'format_id':'h264', 'ext':'mp4', 'vcodec':'avc1', 'acodec':'none', 'height':360, 'filesize':500},
+        {'format_id':'av1', 'ext':'mp4', 'vcodec':'av01', 'acodec':'none', 'height':720, 'filesize':300},
+    ]
+    assert api.format_within_budget({'formats':formats}) == 'h264+a'
+
+
+def test_native_save_reuses_file_for_head_and_ranges(monkeypatch):
+    from urllib.parse import quote
+    monkeypatch.setattr(api, 'ENABLE_SOCIAL', True)
+    calls = []
+    async def worker(action, url, folder, timeout):
+        calls.append(folder)
+        make_file(folder)
+        return {'title':'My real title café'}
+    monkeypatch.setattr(api, 'run_worker', worker)
+    token = api.sign_url('https://youtu.be/abcdefghijk', title='My real title café')
+    with TestClient(api.app) as browser:
+        page = browser.get('/api/download/' + token, headers={'Accept':'text/html'})
+        assert page.status_code == 200
+        assert 'blob:' not in page.text and 'Preparing an iPhone-compatible MP4' in page.text
+        initial = browser.get('/api/download/' + token)
+        status = browser.get('/api/status/' + token).json()
+        assert status['ready'] and status['filename'] == 'My real title café.mp4'
+        head = browser.head(status['url'])
+        assert head.status_code == 200 and head.content == b''
+        assert head.headers['accept-ranges'] == 'bytes'
+        assert quote(status['filename'], safe='') in head.headers['content-disposition']
+        first = browser.get(status['url'], headers={'Range':'bytes=0-3'})
+        second = browser.get(status['url'], headers={'Range':'bytes=4-7', 'If-Range':first.headers['etag']})
+        assert first.status_code == second.status_code == 206
+        assert first.content + second.content == initial.content[:8]
+        assert first.headers['etag'] == second.headers['etag'] == head.headers['etag']
+        assert len(calls) == 1
+        assert calls[0].exists()
+        job = next(iter(api._downloads.values()))
+        job.expires = 0
+        job.readers = 1
+        api.prune_downloads()
+        assert calls[0].exists()  # Never remove a file while a range is being sent.
+        job.readers = 0
+        api.prune_downloads()
+        assert not calls[0].exists()
+
+
+def test_safe_filename_removes_paths_and_header_injection():
+    name = api.safe_filename('../Real title\r\n/another\\name')
+    assert name.endswith('.mp4') and '/' not in name and '\\' not in name
+    assert '\r' not in name and '\n' not in name
+    assert '\u202e' not in api.safe_filename('My \u202evideo.mp4')
+    assert api.safe_filename('Real name.mp4') == 'Real name.mp4'
+    assert len(api.safe_filename('🎬' * 200).encode('utf-8')) <= 204

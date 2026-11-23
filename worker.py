@@ -11,6 +11,6 @@ if __name__ == '__main__':
         result = {key: info.get(key) for key in ('title', 'filesize', 'is_live', 'height')}
     else:
         download_video(url, Path(folder))
-        result = {'ok': True}
+        result = json.loads(Path(folder, 'media.json').read_text(encoding='utf-8'))
     # Keep the protocol separate from yt-dlp/FFmpeg console output.
     Path(folder, 'result.json').write_text(json.dumps(result), encoding='utf-8')
