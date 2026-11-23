@@ -43,6 +43,7 @@ ALLOWED_ORIGINS = [v.strip() for v in os.getenv('VIDLORA_ALLOWED_ORIGINS', 'http
 ENABLE_SOCIAL = os.getenv('VIDLORA_ENABLE_SOCIAL', 'false').lower() == 'true'
 MAX_VIDEO_BYTES = max(5, min(10240, int(os.getenv('VIDLORA_MAX_DOWNLOAD_MB', '300')))) * 1024 * 1024
 TEMP_STORAGE_BYTES = max(128, int(os.getenv('VIDLORA_TEMP_STORAGE_MB', '768'))) * 1024 * 1024
+SAVE_IDLE_SECONDS = max(300, int(os.getenv('VIDLORA_SAVE_IDLE_SECONDS', '900')))
 SECRET = os.getenv('VIDLORA_SIGNING_KEY') or secrets.token_urlsafe(48)
 VIDEO_FORMAT = 'bestvideo*+bestaudio/best'
 
@@ -426,7 +427,7 @@ def download_video(url: str, folder: Path, selected=None):
 
 @app.get('/health')
 def health():
-    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL, 'api_version': '1.4.0', 'max_download_mb': MAX_VIDEO_BYTES // 1024**2}
+    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL, 'api_version': '1.4.1', 'max_download_mb': MAX_VIDEO_BYTES // 1024**2}
 
 
 @app.post('/api/resolve')
@@ -518,7 +519,7 @@ def prune_downloads(required=0):
         for key, job in sorted(list(_downloads.items()), key=lambda item:item[1].last_access):
             if sum(folder_size(j.folder) for j in _downloads.values()) + required <= TEMP_STORAGE_BYTES and len(_downloads) < 8:
                 break
-            if (not job.task or job.task.done()) and not job.readers and time.time() - job.last_access >= 60:
+            if (not job.task or job.task.done()) and not job.readers and time.time() - job.last_access >= SAVE_IDLE_SECONDS:
                 shutil.rmtree(job.folder, ignore_errors=True)
                 del _downloads[key]
 
@@ -566,7 +567,13 @@ async def get_download(token, request):
     async with _creation_lock:
         prune_downloads()
         if key in _downloads:
-            return _downloads[key]
+            cached = _downloads[key]
+            if cached.task.done() and not cached.error and not (cached.folder / ('vidlora.' + cached.ext)).is_file():
+                shutil.rmtree(cached.folder, ignore_errors=True)
+                del _downloads[key]
+            else:
+                cached.last_access = time.time()
+                return cached
         prune_downloads(int(estimated * 2.2))
         if len(_downloads) >= 8 or sum(folder_size(j.folder) for j in _downloads.values()) + estimated * 2.2 > TEMP_STORAGE_BYTES:
             raise HTTPException(503, detail='Temporary download storage is busy. Please try again later.')
@@ -633,11 +640,12 @@ async def download_status(token: str, request: Request):
 
 @app.api_route('/api/file/{token}/{name}', methods=['GET', 'HEAD'])
 async def prepared_file(token: str, name: str, request: Request):
-    unsign(token)
-    prune_downloads()
-    job = _downloads.get(hashlib.sha256(token.encode()).hexdigest())
-    if not job or not job.task.done():
-        raise HTTPException(404, detail='Prepared file unavailable. Return to Vidlora and check the link again.')
+    # A valid saved link must survive cache eviction or a server restart.
+    # Rebuild from its signed source/quality rather than expose a dead 404.
+    job = await get_download(token, request)
+    if not job.task.done() and request.method == 'GET' and 'text/html' in request.headers.get('accept', ''):
+        return preparation_page(token)
+    await asyncio.shield(job.task)
     if job.error:
         raise HTTPException(job.status, detail=job.error)
     return CachedVideoResponse(job)

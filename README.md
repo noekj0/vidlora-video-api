@@ -56,14 +56,17 @@ This version uses FFmpeg, Node 22 and `yt-dlp[default]` (which includes EJS supp
 
 
 
-## Current deployment and limits (API 1.4)
+## Current deployment and limits (API 1.4.1)
 The Railway service deploys automatically from GitHub main. Deploy app.py, worker.py, qualities.py and Dockerfile together. The existing vidlora.download frontend builds its dropdown from the API formats array, so all available quality options appear without a frontend redeploy.
 
 The resolver groups the source's actual formats by resolution, frame rate and dynamic range. It lists each available quality, including 4K/8K only when advertised by the source. Separate original-codec and H.264/AAC iPhone MP4 profiles are offered where available. Every signed download binds the selected dimensions, frame rate, dynamic range and profile. Refreshing the source can fall back to another stream at that exact quality; it never silently reduces resolution. Original AV1/VP9/HDR files may need a compatible player on iPhone. No video is upscaled or re-encoded to invent unavailable qualities.
 
 VIDLORA_MAX_DOWNLOAD_MB defaults to 300 MiB per finished file; the former VIDLORA_MAX_VIDEO_MB=80 setting no longer controls new downloads. VIDLORA_TEMP_STORAGE_MB defaults to 768 MiB total temporary media, including cached files and working files. Admission reserves 2.2 times the estimated output for merging; a live disk monitor enforces the total. One download prepares at a time. The current Railway free/trial service has 1 GB ephemeral storage. Oversized qualities remain visible with a capacity warning and return a clear 413 error instead of a smaller file. Multi-GB 4K files require a hosting/storage change; this code does not activate paid hosting or remove platform restrictions.
 
-Completed files are cached for up to one hour with bounded storage. Older idle cache entries may be evicted to admit a new download; active transfers and very recent saves are protected. A restart clears the temporary cache. Links are signed and expire after one hour. Worker results use result.json separately from console output. Platform blocks, source availability and trial quotas can still prevent downloads. Instagram and TikTok require separate live validation.
+Completed files are cached for up to one hour with bounded storage. Older idle cache entries may be evicted to admit a new download; active transfers and saves accessed within the last 15 minutes are protected. VIDLORA_SAVE_IDLE_SECONDS controls the save window (minimum five minutes). A restart clears the temporary cache. Links are signed and expire after one hour. Worker results use result.json separately from console output. Platform blocks, source availability and trial quotas can still prevent downloads. Instagram and TikTok require separate live validation.
 
 ## iPhone delivery
 The iPhone profile preserves the chosen H.264 video and copies AAC or converts other audio to AAC-LC. MP4 output has a fast-start index. The browser preparation page requires a native tap on the final save link, avoiding large Blob objects and async automatic download clicks. HEAD and Range requests reuse the same file and ETag. Downloads use the source title in a sanitized UTF-8 filename. This validates the server's iPhone delivery behavior; physical-device saving must still be checked on an iPhone.
+
+## Saved-link recovery (API 1.4.1)
+A still-valid signed /api/file link recovers automatically after cache eviction, missing media on disk or a server restart. Browser GET requests reopen preparation while the exact signed quality is rebuilt. HEAD, non-browser GET and Range requests wait for the replacement file. Status checks refresh the save window. Expired or tampered tokens remain rejected. This does not introduce permanent storage or guarantee recovery if the source becomes unavailable.

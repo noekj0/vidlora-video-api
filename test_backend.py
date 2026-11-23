@@ -339,3 +339,58 @@ def test_storage_cleanup_preserves_active_and_recent_downloads(monkeypatch,tmp_p
         api._downloads[name]=api.PreparedDownload(folder,time.time()+3600,name+'.mp4',readers=readers,last_access=access)
     api.prune_downloads(required=40)
     assert set(api._downloads)=={'active','recent'}
+
+
+def test_saved_file_link_recovers_after_server_cache_loss(monkeypatch):
+    from urllib.parse import quote
+    monkeypatch.setattr(api,'ENABLE_SOCIAL',True)
+    calls=[]
+    async def worker(action,url,folder,timeout):
+        calls.append(folder)
+        make_file(folder)
+        return {'title':'Recovered source title','ext':'mp4'}
+    monkeypatch.setattr(api,'run_worker',worker)
+    token=api.sign_url('https://youtu.be/abcdefghijk',title='Recovered source title')
+    file_url='/api/file/'+token+'/'+quote('Recovered source title.mp4')
+    with TestClient(api.app) as browser:
+        # This is exactly what remains in a browser after the server restarts.
+        page=browser.get(file_url,headers={'Accept':'text/html'})
+        assert page.status_code==200 and 'Prepare your video' in page.text
+        status=browser.get('/api/status/'+token).json()
+        head=browser.head(status['url'])
+        first=browser.get(status['url'],headers={'Range':'bytes=0-3'})
+        assert head.status_code==200 and first.status_code==206 and first.content==b'fake'
+        assert len(calls)==1
+
+
+def test_file_missing_on_disk_is_rebuilt_without_dead_download(monkeypatch):
+    monkeypatch.setattr(api,'ENABLE_SOCIAL',True)
+    calls=[]
+    async def worker(action,url,folder,timeout):
+        calls.append(folder)
+        make_file(folder)
+        return {'title':'Disk recovery','ext':'mp4'}
+    monkeypatch.setattr(api,'run_worker',worker)
+    token=api.sign_url('https://youtu.be/abcdefghijk')
+    with TestClient(api.app) as browser:
+        assert browser.get('/api/download/'+token).status_code==200
+        status=browser.get('/api/status/'+token).json()
+        (calls[0]/'vidlora.mp4').unlink()
+        recovered=browser.get(status['url'],headers={'Range':'bytes=4-7'})
+        assert recovered.status_code==206 and recovered.content==b'-mp4'
+        assert len(calls)==2
+
+
+def test_prepared_save_is_not_evicted_after_one_minute(monkeypatch,tmp_path):
+    import time
+    monkeypatch.setattr(api,'TEMP_STORAGE_BYTES',100)
+    folder=tmp_path/'waiting-for-save'
+    folder.mkdir()
+    (folder/'vidlora.mp4').write_bytes(b'x'*80)
+    job=api.PreparedDownload(folder,time.time()+3600,'title.mp4',last_access=time.time()-120)
+    api._downloads['waiting']=job
+    api.prune_downloads(required=50)
+    assert 'waiting' in api._downloads and folder.exists()
+    job.last_access=time.time()-api.SAVE_IDLE_SECONDS-1
+    api.prune_downloads(required=50)
+    assert not api._downloads and not folder.exists()
