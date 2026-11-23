@@ -22,7 +22,7 @@ def reset_download_cache(monkeypatch):
     import asyncio
     import shutil
     api._limiter.clear()
-    monkeypatch.setattr(api, '_download_lock', asyncio.Semaphore(2))
+    monkeypatch.setattr(api, '_download_lock', asyncio.Semaphore(1))
     monkeypatch.setattr(api, '_creation_lock', asyncio.Lock())
     yield
     for job in api._downloads.values():
@@ -66,7 +66,7 @@ def test_real_download_route(monkeypatch, tmp_path):
     assert media.content == b'fake-mp4-test-bytes'
     assert not folders[0].exists()  # Metadata workspace is removed immediately.
     assert folders[-1].exists()  # Safari may resume with another range request.
-    assert api._download_lock._value == 2
+    assert api._download_lock._value == 1
 
 
 def make_file(folder):
@@ -127,7 +127,7 @@ def test_worker_failure_cleans_up(monkeypatch):
     token = api.sign_url('https://youtu.be/abcdefghijk')
     assert client.get('/api/download/' + token).status_code == 504
     assert all(not folder.exists() for folder in folders)
-    assert api._download_lock._value == 2
+    assert api._download_lock._value == 1
 
 
 def test_real_worker_is_terminated_on_timeout(tmp_path, monkeypatch):
@@ -249,3 +249,93 @@ def test_safe_filename_removes_paths_and_header_injection():
     assert '\u202e' not in api.safe_filename('My \u202evideo.mp4')
     assert api.safe_filename('Real name.mp4') == 'Real name.mp4'
     assert len(api.safe_filename('🎬' * 200).encode('utf-8')) <= 204
+
+
+def source_formats():
+    return {'duration':60, 'formats': [
+        {'format_id':'audio', 'url':'https://example.invalid/audio', 'ext':'m4a', 'vcodec':'none', 'acodec':'mp4a.40.2', 'filesize':1000},
+        *[{'format_id':str(height), 'url':'https://example.invalid/video', 'ext':'mp4', 'vcodec':'avc1', 'acodec':'none', 'height':height, 'width':height*16//9, 'fps':30, 'filesize':height*1000} for height in (144,360,720,1080,2160)],
+        {'format_id':'4k-av1', 'url':'https://example.invalid/av1', 'ext':'mp4', 'vcodec':'av01', 'acodec':'none', 'height':2160, 'width':3840, 'fps':60, 'filesize':500000},
+    ]}
+
+
+def test_all_real_qualities_remain_visible_over_capacity():
+    options = api.discover_qualities(source_formats(), 800000)
+    assert {q['height'] for q in options} == {144,360,720,1080,2160}
+    fourk = [q for q in options if q['height']==2160 and q['fps']==30]
+    assert fourk and all(not q['downloadable'] for q in fourk)
+    assert all('4K' in q['label'] and 'hosting capacity' in q['label'] for q in fourk)
+    original = next(q for q in options if q['height']==2160 and q['fps']==60)
+    assert original['profile']=='original' and original['downloadable']
+
+
+def test_exact_selection_never_falls_back_to_smaller_resolution():
+    info = source_formats()
+    selected = next(q for q in api.discover_qualities(info, 3000000) if q['height']==2160 and q['fps']==30 and q['profile']=='iphone')
+    assert api.choose_exact_quality(info, selected, 3000000)['selector']=='2160+audio'
+    limited = api.choose_exact_quality(info, selected, 800000)
+    assert limited['height']==2160 and not limited['downloadable']
+    info['formats'] = [f for f in info['formats'] if f['format_id']!='2160']
+    with pytest.raises(ValueError, match='no longer available'):
+        api.choose_exact_quality(info, selected, 3000000)
+
+
+def test_silent_source_keeps_its_real_resolution():
+    info = source_formats()
+    info['formats'] = [info['formats'][-1]]
+    options = api.discover_qualities(info, 3000000)
+    assert len(options)==1 and options[0]['selector']=='4k-av1' and options[0]['height']==2160
+
+
+def test_selected_quality_reaches_worker_and_native_save(monkeypatch):
+    import json
+    monkeypatch.setattr(api, 'ENABLE_SOCIAL', True)
+    monkeypatch.setattr(api, 'PUBLIC_URL', 'https://testserver')
+    info = source_formats()
+    async def worker(action, url, folder, timeout):
+        if action=='metadata':
+            return {'title':'Actual source title', 'qualities':api.discover_qualities(info, api.MAX_VIDEO_BYTES)}
+        selected = json.loads((folder/'request.json').read_text())['quality']
+        assert selected['height']==1080 and selected['profile']=='iphone'
+        make_file(folder)
+        return {'title':'Actual source title', 'ext':'mp4'}
+    monkeypatch.setattr(api, 'run_worker', worker)
+    with TestClient(api.app) as browser:
+        response = browser.post('/api/resolve', json={'url':'https://youtu.be/abcdefghijk','authorized':True})
+        assert response.status_code==200
+        option = next(q for q in response.json()['formats'] if q['label'].startswith('1080p') and q['iphone_compatible'])
+        token = option['url'].rsplit('/',1)[-1]
+        assert browser.get('/api/download/'+token).status_code==200
+        status = browser.get('/api/status/'+token).json()
+        assert status['filename']=='Actual source title.mp4'
+
+
+def test_oversized_quality_is_rejected_without_substituting(monkeypatch):
+    monkeypatch.setattr(api, 'ENABLE_SOCIAL', True)
+    token = api.sign_url('https://youtu.be/abcdefghijk', quality={'height':2160,'profile':'original','estimated_bytes':api.MAX_VIDEO_BYTES+1})
+    result = client.get('/api/download/'+token)
+    assert result.status_code==413 and 'resolution has not been changed' in result.json()['detail']
+    assert not api._downloads
+
+
+def test_quality_cannot_be_changed_in_signed_download():
+    import base64,json
+    token = api.sign_url('https://youtu.be/abcdefghijk', quality={'height':144})
+    raw,signature = token.rsplit('.',1)
+    payload = json.loads(base64.urlsafe_b64decode(raw+'='*(-len(raw)%4)))
+    payload['q']['height']=2160
+    changed = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip('=')+'.'+signature
+    with pytest.raises(api.HTTPException):
+        api.unsign(changed)
+
+
+def test_storage_cleanup_preserves_active_and_recent_downloads(monkeypatch,tmp_path):
+    import time
+    monkeypatch.setattr(api,'TEMP_STORAGE_BYTES',100)
+    for name,readers,access in [('old',0,0),('active',1,0),('recent',0,time.time())]:
+        folder=tmp_path/name
+        folder.mkdir()
+        (folder/'vidlora.mp4').write_bytes(b'x'*30)
+        api._downloads[name]=api.PreparedDownload(folder,time.time()+3600,name+'.mp4',readers=readers,last_access=access)
+    api.prune_downloads(required=40)
+    assert set(api._downloads)=={'active','recent'}

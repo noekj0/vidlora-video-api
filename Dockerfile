@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg ca-certi
 WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY app.py worker.py ./
+COPY app.py worker.py qualities.py ./
 RUN useradd --uid 10001 -m vidlora && mkdir /home/vidlora/tmp && chown -R vidlora:vidlora /home/vidlora/tmp
 USER vidlora
 ENV TMPDIR=/home/vidlora/tmp

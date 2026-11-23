@@ -11,5 +11,5 @@ services:
         value: https://vidlora.download,https://www.vidlora.download
       - key: VIDLORA_SIGNING_KEY
         generateValue: true
-      - key: VIDLORA_MAX_VIDEO_MB
-        value: "80"
+      - key: VIDLORA_MAX_DOWNLOAD_MB
+        value: "300"

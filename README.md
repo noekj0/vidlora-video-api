@@ -8,7 +8,7 @@ This is an **experimental developer version**. The API is deployed at https://vi
 
 1. Unzip this backend ZIP on your computer.
 2. Sign in to GitHub and create a **new repository**, e.g. `vidlora-video-api`. Use a **separate repo** from the repository where you host your APK asset.
-3. Upload `app.py`, `worker.py`, `requirements.txt`, `Dockerfile`, and `render.yaml` from this ZIP to that repository root. Publish the commit.
+3. Upload `app.py`, `worker.py`, `qualities.py`, `requirements.txt`, `Dockerfile`, and `render.yaml` from this ZIP to that repository root. Publish the commit.
 4. In https://dashboard.render.com/ choose **New → Blueprint** and connect your new GitHub repository. Render will read `render.yaml`. Review the plan and confirm **Deploy**.
 5. When the service says `Live`, open its URL, which will look like `https://vidlora-video-api.onrender.com/health` (your actual name may be different). A JSON response with `"ok": true` and `"downloads_enabled": true` confirms that the API is running.
 6. **Important: a running API alone does NOT prove YouTube, Instagram or TikTok downloads work.** Test with an **owned/authorized public video**. The platforms may require authentication or reject video extraction from this hosting provider.
@@ -50,14 +50,20 @@ If available, the server responds with the real video title and an expiring `/ap
 
 ### Deployment config
 
-`render.yaml` sets `VIDLORA_ENABLE_SOCIAL=true`, `VIDLORA_ALLOWED_ORIGINS` to your current site, an auto-generated `VIDLORA_SIGNING_KEY`, and a max file size of 80 MB. When using Render's assigned `.onrender.com` hostname, the service constructs its own HTTPS download links. For a custom API hostname set `VIDLORA_PUBLIC_URL=https://your-api-domain.example` in Render environment variables. Never place secrets in the website's `config.js`.
+`render.yaml` sets `VIDLORA_ENABLE_SOCIAL=true`, `VIDLORA_ALLOWED_ORIGINS` to your current site, an auto-generated `VIDLORA_SIGNING_KEY`, and a max file size of 300 MiB. When using Render's assigned `.onrender.com` hostname, the service constructs its own HTTPS download links. For a custom API hostname set `VIDLORA_PUBLIC_URL=https://your-api-domain.example` in Render environment variables. Never place secrets in the website's `config.js`.
 
 This version uses FFmpeg, Node 22 and `yt-dlp[default]` (which includes EJS support). Production-hardening and active platform tests remain necessary.
 
 
 
-## Current deployment and limits
-The existing Railway service deploys automatically from GitHub main. Keep app.py and worker.py in the same commit. The Netlify frontend remains on vidlora.download. Media selection budgets both video and audio within VIDLORA_MAX_VIDEO_MB (currently 80 MiB), with a container margin. Long videos may need lower resolution; the API returns the selected resolution. Download links last one hour. Worker results use result.json, separately from yt-dlp/FFmpeg console output. Railway is on its limited trial; this does not create a paid subscription or guarantee permanent free hosting.
+## Current deployment and limits (API 1.4)
+The Railway service deploys automatically from GitHub main. Deploy app.py, worker.py, qualities.py and Dockerfile together. The existing vidlora.download frontend builds its dropdown from the API formats array, so all available quality options appear without a frontend redeploy.
 
-## iPhone delivery (API 1.3)
-The server selects H.264 video, normalizes audio to AAC-LC when needed, and writes a fast-start MP4. Native browser navigation opens a short preparation page; the user taps the final save link once ready. This avoids large browser Blob objects and an automatic async download click. Prepared files are retained in a bounded, in-memory-indexed temporary cache for up to one hour so HEAD and Range requests reuse the same bytes and ETag. Active transfers are protected from cleanup. Filenames come from the real video title, with a sanitized UTF-8 filename header and matching URL basename. Native saves on a physical iPhone still require device verification. The local 25-minute and 94-minute test outputs both validated as H.264/AAC fast-start MP4 files. The frontend source backup uses native links; the existing deployed site already uses native links.
+The resolver groups the source's actual formats by resolution, frame rate and dynamic range. It lists each available quality, including 4K/8K only when advertised by the source. Separate original-codec and H.264/AAC iPhone MP4 profiles are offered where available. Every signed download binds the selected dimensions, frame rate, dynamic range and profile. Refreshing the source can fall back to another stream at that exact quality; it never silently reduces resolution. Original AV1/VP9/HDR files may need a compatible player on iPhone. No video is upscaled or re-encoded to invent unavailable qualities.
+
+VIDLORA_MAX_DOWNLOAD_MB defaults to 300 MiB per finished file; the former VIDLORA_MAX_VIDEO_MB=80 setting no longer controls new downloads. VIDLORA_TEMP_STORAGE_MB defaults to 768 MiB total temporary media, including cached files and working files. Admission reserves 2.2 times the estimated output for merging; a live disk monitor enforces the total. One download prepares at a time. The current Railway free/trial service has 1 GB ephemeral storage. Oversized qualities remain visible with a capacity warning and return a clear 413 error instead of a smaller file. Multi-GB 4K files require a hosting/storage change; this code does not activate paid hosting or remove platform restrictions.
+
+Completed files are cached for up to one hour with bounded storage. Older idle cache entries may be evicted to admit a new download; active transfers and very recent saves are protected. A restart clears the temporary cache. Links are signed and expire after one hour. Worker results use result.json separately from console output. Platform blocks, source availability and trial quotas can still prevent downloads. Instagram and TikTok require separate live validation.
+
+## iPhone delivery
+The iPhone profile preserves the chosen H.264 video and copies AAC or converts other audio to AAC-LC. MP4 output has a fast-start index. The browser preparation page requires a native tap on the final save link, avoiding large Blob objects and async automatic download clicks. HEAD and Range requests reuse the same file and ETag. Downloads use the source title in a sanitized UTF-8 filename. This validates the server's iPhone delivery behavior; physical-device saving must still be checked on an iPhone.
