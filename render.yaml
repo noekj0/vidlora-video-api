@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: vidlora-video-api
+    runtime: docker
+    plan: free
+    healthCheckPath: /health
+    envVars:
+      - key: VIDLORA_ENABLE_SOCIAL
+        value: "true"
+      - key: VIDLORA_ALLOWED_ORIGINS
+        value: https://vidlora.download,https://www.vidlora.download
+      - key: VIDLORA_SIGNING_KEY
+        generateValue: true
+      - key: VIDLORA_MAX_VIDEO_MB
+        value: "80"
