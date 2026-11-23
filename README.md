@@ -2,7 +2,7 @@
 
 **This is real API code, not a mockup.** It receives a permitted public YouTube, Instagram, or TikTok URL, attempts to obtain metadata using yt-dlp, and returns a temporary URL. A visit to the temporary URL makes the server attempt to download the video and deliver the file using `Content-Disposition: attachment`.
 
-This is an **experimental developer version**: it is NOT currently running on Render or connected to the Vidlora website, and live platform compatibility has NOT been verified. YouTube, Instagram and TikTok may reject requests from datacenter IPs or change extraction behavior. No watermark-removal feature is provided. Do not download media without rights or authorization, and comply with source platform terms.
+This is an **experimental developer version**. The API is deployed at https://vidlora-video-api-production.up.railway.app on a Railway trial. The health and CORS checks pass. The authorized YouTube test on 2026-11-23 was rejected by YouTube with a bot-confirmation requirement; no successful hosted video download is claimed. Instagram and TikTok have not been tested live. Render deployment was cancelled because card verification was declined. YouTube, Instagram and TikTok may reject requests from datacenter IPs or change extraction behavior. No watermark-removal feature is provided. Do not download media without rights or authorization, and comply with source platform terms.
 
 ## Quick deploy on Render using GitHub (easiest)
 
@@ -53,3 +53,4 @@ If available, the server responds with the real video title and an expiring `/ap
 `render.yaml` sets `VIDLORA_ENABLE_SOCIAL=true`, `VIDLORA_ALLOWED_ORIGINS` to your current site, an auto-generated `VIDLORA_SIGNING_KEY`, and a max file size of 80 MB. When using Render's assigned `.onrender.com` hostname, the service constructs its own HTTPS download links. For a custom API hostname set `VIDLORA_PUBLIC_URL=https://your-api-domain.example` in Render environment variables. Never place secrets in the website's `config.js`.
 
 This version uses FFmpeg, Node 22 and `yt-dlp[default]` (which includes EJS support). Production-hardening and active platform tests remain necessary.
+

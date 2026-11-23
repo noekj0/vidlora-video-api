@@ -47,6 +47,13 @@ _download_lock = asyncio.Semaphore(2)
 _metadata_lock = asyncio.Semaphore(2)
 
 
+class SourceBlocked(ValueError):
+    pass
+
+
+BLOCKED_MESSAGE = 'This video platform is blocking requests from our hosting server. This video cannot be downloaded here right now.'
+
+
 async def run_worker(action: str, url: str, folder: Path, timeout: float):
     """Own the entire process tree until it exits, including on cancellation."""
     process = await asyncio.create_subprocess_exec(
@@ -79,6 +86,8 @@ async def run_worker(action: str, url: str, folder: Path, timeout: float):
         stdout, stderr = communication.result()
         if process.returncode:
             logging.warning('Video worker failed: %s', stderr.decode(errors='replace')[-1500:])
+            if 'not a bot' in stderr.decode(errors='replace').lower():
+                raise SourceBlocked(BLOCKED_MESSAGE)
             raise ValueError('Source could not provide this public video')
         return json.loads(stdout)
     finally:
@@ -261,6 +270,8 @@ async def resolve(data: ResolveRequest, request: Request):
     folder = Path(tempfile.mkdtemp(prefix='vidlora-metadata-'))
     try:
         info = await run_worker('metadata', data.url, folder, 35)
+    except SourceBlocked as ex:
+        raise HTTPException(422, detail=BLOCKED_MESSAGE) from ex
     except Exception as ex:
         raise HTTPException(422, detail='Unable to resolve this public video. The source may require authorization or restrict downloads.') from ex
     finally:
@@ -313,4 +324,6 @@ async def download(token: str, request: Request, background_tasks: BackgroundTas
         _download_lock.release()
         if not isinstance(ex, Exception):
             raise
+        if isinstance(ex, SourceBlocked):
+            raise HTTPException(422, detail=BLOCKED_MESSAGE) from ex
         raise HTTPException(422, detail='Download failed or source does not permit this file.') from ex

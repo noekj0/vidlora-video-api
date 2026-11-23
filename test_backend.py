@@ -71,6 +71,17 @@ def test_permission_required(monkeypatch):
     assert client.post('/api/resolve', json={'url': 'https://youtu.be/abcdefghijk'}).status_code == 400
 
 
+def test_platform_block_is_explained(monkeypatch):
+    monkeypatch.setattr(api, 'ENABLE_SOCIAL', True)
+    async def blocked(*args):
+        raise api.SourceBlocked()
+    monkeypatch.setattr(api, 'run_worker', blocked)
+    api._limiter.clear()
+    result = client.post('/api/resolve', json={'url': 'https://youtu.be/abcdefghijk', 'authorized': True})
+    assert result.status_code == 422
+    assert 'hosting server' in result.json()['detail']
+
+
 def test_invalid_and_expired_signatures():
     assert client.get('/api/download/' + api.sign_url('https://youtu.be/abcdefghijk', -5)).status_code in (403, 503)
     with pytest.raises(api.HTTPException):
@@ -98,7 +109,7 @@ def test_real_worker_is_terminated_on_timeout(tmp_path, monkeypatch):
     import time
     # Exercise a real child process rather than mocking cancellation behavior.
     worker = tmp_path / 'worker.py'
-    worker.write_text('import time, pathlib, sys\np=pathlib.Path(sys.argv[3])\np.joinpath("started").write_text("yes")\ntime.sleep(3)\np.joinpath("orphan").write_text("bad")\n')
+    worker.write_text('import time, pathlib, sys, subprocess\np=pathlib.Path(sys.argv[3])\np.joinpath("started").write_text("yes")\nsubprocess.Popen([sys.executable, "-c", "import time,pathlib,sys; time.sleep(3); pathlib.Path(sys.argv[1]).write_text(\'bad\')", str(p / "orphan")])\ntime.sleep(10)\n')
     monkeypatch.setattr(api, '__file__', str(tmp_path / 'app.py'))
     with pytest.raises(TimeoutError):
         asyncio.run(api.run_worker('metadata', 'https://youtu.be/abcdefghijk', tmp_path, 1))
