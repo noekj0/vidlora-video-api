@@ -12,4 +12,5 @@ if __name__ == '__main__':
     else:
         download_video(url, Path(folder))
         result = {'ok': True}
-    print(json.dumps(result))
+    # Keep the protocol separate from yt-dlp/FFmpeg console output.
+    Path(folder, 'result.json').write_text(json.dumps(result), encoding='utf-8')

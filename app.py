@@ -79,11 +79,11 @@ async def run_worker(action: str, url: str, folder: Path, timeout: float):
     """Own the entire process tree until it exits, including on cancellation."""
     process = await asyncio.create_subprocess_exec(
         sys.executable, str(Path(__file__).with_name('worker.py')), action, url,
-        str(folder), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        str(folder), stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
         start_new_session=os.name != 'nt',
     )
     async def watch():
-        while process.returncode is None:
+        while True:
             # Allow room for separate tracks and merging, but bound temporary disk use.
             size = 0
             for path in folder.glob('*'):
@@ -107,10 +107,12 @@ async def run_worker(action: str, url: str, folder: Path, timeout: float):
         stdout, stderr = communication.result()
         if process.returncode:
             logging.warning('Video worker failed: %s', stderr.decode(errors='replace')[-1500:])
-            if 'not a bot' in stderr.decode(errors='replace').lower():
+            if any(reason in stderr.decode(errors='replace').lower() for reason in ('not a bot', 'http error 403')):
                 raise SourceBlocked(BLOCKED_MESSAGE)
+            if process.returncode == -9:
+                raise ValueError('The server ran out of resources while preparing this video.')
             raise ValueError('Source could not provide this public video')
-        return json.loads(stdout)
+        return json.loads((folder / 'result.json').read_text(encoding='utf-8'))
     finally:
         if process.returncode is None:
             if os.name == 'nt':
@@ -192,6 +194,7 @@ def enforce_rate_limit(key: str, count: int, window: int):
 def extractor_options() -> dict:
     return {
         'quiet': True,
+        'noprogress': True,
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
@@ -206,6 +209,7 @@ def extractor_options() -> dict:
         'playlistend': 1,
         'js_runtimes': {'node': {}},
         'ignoreerrors': False,
+        **({'ffmpeg_location': os.environ['VIDLORA_FFMPEG_PATH']} if os.getenv('VIDLORA_FFMPEG_PATH') else {}),
     }
 
 
@@ -277,7 +281,7 @@ def download_video(url: str, folder: Path):
 
 @app.get('/health')
 def health():
-    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL}
+    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL, 'api_version': '1.1.0'}
 
 
 @app.post('/api/resolve')

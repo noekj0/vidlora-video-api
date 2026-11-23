@@ -88,6 +88,19 @@ def test_invalid_and_expired_signatures():
         api.unsign(api.sign_url('https://youtu.be/abcdefghijk') + 'tampered')
 
 
+def test_expired_browser_link_has_readable_error(monkeypatch):
+    monkeypatch.setattr(api, 'ENABLE_SOCIAL', True)
+    token = api.sign_url('https://youtu.be/abcdefghijk', -5)
+    browser = client.get('/api/download/' + token, headers={'Accept': 'text/html'})
+    assert browser.status_code == 403
+    assert browser.headers['content-type'].startswith('text/html')
+    assert 'Download link expired or invalid.' in browser.text
+    assert 'Return to Vidlora' in browser.text
+    api_client = client.get('/api/download/' + token)
+    assert api_client.status_code == 403
+    assert api_client.json()['detail'] == 'Download link expired or invalid.'
+
+
 def test_worker_failure_cleans_up(monkeypatch):
     monkeypatch.setattr(api, 'ENABLE_SOCIAL', True)
     folders = []
@@ -116,3 +129,11 @@ def test_real_worker_is_terminated_on_timeout(tmp_path, monkeypatch):
     time.sleep(3)
     assert (tmp_path / 'started').exists()
     assert not (tmp_path / 'orphan').exists()
+
+
+def test_worker_console_output_cannot_corrupt_result(tmp_path, monkeypatch):
+    import asyncio
+    worker = tmp_path / 'worker.py'
+    worker.write_text('import pathlib, sys\nprint("[download] 100% complete")\npathlib.Path(sys.argv[3], "result.json").write_text(\'{"ok": true}\')\n')
+    monkeypatch.setattr(api, '__file__', str(tmp_path / 'app.py'))
+    assert asyncio.run(api.run_worker('download', 'https://youtu.be/abcdefghijk', tmp_path, 10)) == {'ok': True}
