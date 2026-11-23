@@ -8,7 +8,7 @@ if __name__ == '__main__':
     action, url, folder = sys.argv[1:]
     if action == 'metadata':
         info = get_metadata(url)
-        result = {key: info.get(key) for key in ('title', 'filesize', 'is_live')}
+        result = {key: info.get(key) for key in ('title', 'filesize', 'is_live', 'height')}
     else:
         download_video(url, Path(folder))
         result = {'ok': True}

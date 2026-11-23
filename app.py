@@ -72,6 +72,10 @@ class SourceBlocked(ValueError):
     pass
 
 
+class VideoSizeLimit(ValueError):
+    pass
+
+
 BLOCKED_MESSAGE = 'This video platform is blocking requests from our hosting server. This video cannot be downloaded here right now.'
 
 
@@ -109,6 +113,8 @@ async def run_worker(action: str, url: str, folder: Path, timeout: float):
             logging.warning('Video worker failed: %s', stderr.decode(errors='replace')[-1500:])
             if any(reason in stderr.decode(errors='replace').lower() for reason in ('not a bot', 'http error 403')):
                 raise SourceBlocked(BLOCKED_MESSAGE)
+            if 'no format fits the server size limit' in stderr.decode(errors='replace').lower():
+                raise VideoSizeLimit('No available video quality fits the server size limit.')
             if process.returncode == -9:
                 raise ValueError('The server ran out of resources while preparing this video.')
             raise ValueError('Source could not provide this public video')
@@ -213,9 +219,42 @@ def extractor_options() -> dict:
     }
 
 
+def format_within_budget(info):
+    """Choose a real stream or pair whose estimated combined size fits storage."""
+    formats = info.get('formats') or []
+    budget = MAX_VIDEO_BYTES * .97  # Leave room for MP4 container overhead.
+    def size(f):
+        return f.get('filesize') or f.get('filesize_approx') or float('inf')
+    audio = sorted([f for f in formats if f.get('vcodec') == 'none' and f.get('acodec') not in (None, 'none')
+                    and f.get('ext') in ('m4a', 'webm')], key=lambda f: f.get('abr') or f.get('tbr') or 0, reverse=True)
+    choices = []
+    for index, video in enumerate(formats):
+        if video.get('ext') != 'mp4' or video.get('vcodec') in (None, 'none') or video.get('has_drm'):
+            continue
+        height = video.get('height') or 0
+        if height > 720:
+            continue
+        if video.get('acodec') not in (None, 'none'):
+            if size(video) <= budget:
+                choices.append((height, index, str(video['format_id'])))
+        else:
+            for track in audio:
+                if size(video) + size(track) <= budget:
+                    choices.append((height, index, str(video['format_id']) + '+' + str(track['format_id'])))
+                    break
+    if choices:
+        return max(choices)[2]
+    if formats and all(size(f) == float('inf') for f in formats):
+        return VIDEO_FORMAT  # Some platforms do not advertise sizes; enforce while downloading.
+    raise VideoSizeLimit('No format fits the server size limit.')
+
+
 def get_metadata(url: str):
     with yt_dlp.YoutubeDL(extractor_options()) as downloader:
         info = downloader.extract_info(url, download=False)
+        if isinstance(info, dict) and info.get('_type') != 'playlist' and not info.get('is_live'):
+            downloader.format_selector = downloader.build_format_selector(format_within_budget(info))
+            info = downloader.process_ie_result(info, download=False)
     if not isinstance(info, dict):
         raise ValueError('No downloadable information returned by source.')
     if info.get('_type') == 'playlist':
@@ -270,18 +309,19 @@ def download_video(url: str, folder: Path):
         info = downloader.extract_info(url, download=False)
         if not isinstance(info, dict) or info.get('_type') == 'playlist' or info.get('is_live') or info.get('has_drm'):
             raise ValueError('Only individual public videos are supported.')
+        downloader.format_selector = downloader.build_format_selector(format_within_budget(info))
         downloader.process_ie_result(info, download=True)
     path = folder / 'vidlora.mp4'
     if not path.is_file():
         raise ValueError('No completed video file could be downloaded from this source.')
     if path.stat().st_size > MAX_VIDEO_BYTES:
-        raise ValueError('This video is too large for this service.')
+        raise VideoSizeLimit('No format fits the server size limit.')
     return path
 
 
 @app.get('/health')
 def health():
-    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL, 'api_version': '1.1.0'}
+    return {'ok': True, 'downloads_enabled': ENABLE_SOCIAL, 'api_version': '1.2.0'}
 
 
 @app.post('/api/resolve')
@@ -301,6 +341,8 @@ async def resolve(data: ResolveRequest, request: Request):
         info = await run_worker('metadata', data.url, folder, 35)
     except SourceBlocked as ex:
         raise HTTPException(422, detail=BLOCKED_MESSAGE) from ex
+    except VideoSizeLimit as ex:
+        raise HTTPException(413, detail='This video cannot fit the 80 MB limit at any available quality.') from ex
     except Exception as ex:
         raise HTTPException(422, detail='Unable to resolve this public video. The source may require authorization or restrict downloads.') from ex
     finally:
@@ -326,7 +368,7 @@ async def resolve(data: ResolveRequest, request: Request):
     return {
         'title': str(info.get('title') or 'Video').strip()[:150],
         # The service does not expose remote thumbnails or personal data by default.
-        'formats': [{'label': 'Best available video (up to 720p)', 'url': public_base + '/api/download/' + token, 'ext': 'mp4'}],
+        'formats': [{'label': 'MP4' + (f" · {info['height']}p" if info.get('height') else ' video'), 'url': public_base + '/api/download/' + token, 'ext': 'mp4'}],
     }
 
 
@@ -355,4 +397,6 @@ async def download(token: str, request: Request, background_tasks: BackgroundTas
             raise
         if isinstance(ex, SourceBlocked):
             raise HTTPException(422, detail=BLOCKED_MESSAGE) from ex
+        if isinstance(ex, VideoSizeLimit):
+            raise HTTPException(413, detail='This video cannot fit the 80 MB limit at any available quality.') from ex
         raise HTTPException(422, detail='Download failed or source does not permit this file.') from ex

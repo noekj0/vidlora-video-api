@@ -137,3 +137,26 @@ def test_worker_console_output_cannot_corrupt_result(tmp_path, monkeypatch):
     worker.write_text('import pathlib, sys\nprint("[download] 100% complete")\npathlib.Path(sys.argv[3], "result.json").write_text(\'{"ok": true}\')\n')
     monkeypatch.setattr(api, '__file__', str(tmp_path / 'app.py'))
     assert asyncio.run(api.run_worker('download', 'https://youtu.be/abcdefghijk', tmp_path, 10)) == {'ok': True}
+
+
+def test_size_budget_includes_audio_and_chooses_smaller_video(monkeypatch):
+    monkeypatch.setattr(api, 'MAX_VIDEO_BYTES', 1000)
+    info = {'formats': [
+        {'format_id':'audio', 'ext':'m4a', 'vcodec':'none', 'acodec':'aac', 'filesize':300},
+        {'format_id':'small', 'ext':'mp4', 'vcodec':'avc1', 'acodec':'none', 'height':360, 'filesize':600},
+        {'format_id':'large', 'ext':'mp4', 'vcodec':'avc1', 'acodec':'none', 'height':720, 'filesize':900},
+    ]}
+    assert api.format_within_budget(info) == 'small+audio'
+
+
+def test_long_video_can_use_smaller_opus_audio(monkeypatch):
+    monkeypatch.setattr(api, 'MAX_VIDEO_BYTES', 1000)
+    info = {'formats': [
+        {'format_id':'aac', 'ext':'m4a', 'vcodec':'none', 'acodec':'aac', 'abr':128, 'filesize':1200},
+        {'format_id':'opus', 'ext':'webm', 'vcodec':'none', 'acodec':'opus', 'abr':48, 'filesize':200},
+        {'format_id':'video', 'ext':'mp4', 'vcodec':'avc1', 'acodec':'none', 'height':240, 'filesize':600},
+    ]}
+    assert api.format_within_budget(info) == 'video+opus'
+    info['formats'].pop(1)
+    with pytest.raises(api.VideoSizeLimit):
+        api.format_within_budget(info)
