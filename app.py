@@ -10,6 +10,7 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 import hashlib
 import hmac
+import html
 import json
 import logging
 import os
@@ -25,7 +26,7 @@ from urllib.parse import urlsplit, parse_qs
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.background import BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import yt_dlp
@@ -36,9 +37,29 @@ ALLOWED_ORIGINS = [v.strip() for v in os.getenv('VIDLORA_ALLOWED_ORIGINS', 'http
 ENABLE_SOCIAL = os.getenv('VIDLORA_ENABLE_SOCIAL', 'false').lower() == 'true'
 MAX_VIDEO_BYTES = max(5, min(200, int(os.getenv('VIDLORA_MAX_VIDEO_MB', '80')))) * 1024 * 1024
 SECRET = os.getenv('VIDLORA_SIGNING_KEY') or secrets.token_urlsafe(48)
+VIDEO_FORMAT = 'bv[ext=mp4][height<=720]+ba[ext=m4a]/b[ext=mp4][height<=720]'
 
 app = FastAPI(title='Vidlora Video API', docs_url=None, redoc_url=None)
 app.add_middleware(CORSMiddleware, allow_origins=ALLOWED_ORIGINS, allow_credentials=False, allow_methods=['POST', 'GET'], allow_headers=['Content-Type'])
+
+
+@app.exception_handler(HTTPException)
+async def readable_download_error(request: Request, error: HTTPException):
+    # Existing website links open the API in a browser tab. Keep API clients on
+    # JSON, but give visitors a useful page rather than a raw JSON document.
+    if request.url.path.startswith('/api/download/') and 'text/html' in request.headers.get('accept', ''):
+        message = html.escape(str(error.detail))
+        return HTMLResponse(
+            '<!doctype html><html lang="en"><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>Vidlora download</title><style>body{font:18px/1.6 system-ui;'
+            'background:#f3f7ff;color:#142145;max-width:620px;margin:12vh auto;padding:24px}'
+            'a{color:#087aff}h1{line-height:1.2}</style><h1>Video could not be downloaded</h1>'
+            f'<p>{message}</p><p><a href="https://vidlora.download/#online">'
+            'Return to Vidlora and check the link again</a></p></html>',
+            status_code=error.status_code, headers=error.headers,
+        )
+    return JSONResponse({'detail': error.detail}, status_code=error.status_code, headers=error.headers)
 
 # Starter-only in-process limits. Replace with a distributed limiter, abuse protection,
 # and storage quotas before running this as a high-traffic public service.
@@ -174,6 +195,10 @@ def extractor_options() -> dict:
         'no_warnings': True,
         'noplaylist': True,
         'skip_download': True,
+        'format': VIDEO_FORMAT,
+        # Probe selected streams before offering them. Metadata alone can succeed
+        # even when the source rejects the actual media URL with HTTP 403.
+        'check_formats': 'selected',
         'socket_timeout': 10,
         'retries': 1,
         'fragment_retries': 1,
@@ -196,7 +221,7 @@ def get_metadata(url: str):
     return info
 
 
-def sign_url(url: str, max_age: int = 600):
+def sign_url(url: str, max_age: int = 3600):
     payload = {'u': url, 'e': int(time.time()) + max_age}
     raw = base64.urlsafe_b64encode(json.dumps(payload, separators=(',', ':')).encode()).decode().rstrip('=')
     signature = hmac.new(SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
@@ -228,7 +253,7 @@ def download_video(url: str, folder: Path):
     opts = extractor_options()
     opts.update({
         'skip_download': False,
-        'format': 'b[ext=mp4][height<=720]/bv[ext=mp4][height<=720]+ba[ext=m4a]',
+        'format': VIDEO_FORMAT,
         'outtmpl': str(folder / 'vidlora.%(ext)s'),
         'restrictfilenames': True,
         'max_filesize': MAX_VIDEO_BYTES,
